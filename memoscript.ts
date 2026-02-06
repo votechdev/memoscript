@@ -165,7 +165,7 @@ async function handleApiError(response: Response): Promise<never> {
   const status = response.status;
   let detail = '';
   try {
-    const body = await response.json();
+    const body = await response.json() as { message?: string; error?: string };
     detail = body.message || body.error || JSON.stringify(body);
   } catch {
     detail = response.statusText;
@@ -232,8 +232,433 @@ export async function apiRequest<T>(method: string, path: string, body?: unknown
   return response.json() as Promise<T>;
 }
 
+// Helper to extract numeric ID from resource name
+function extractId(nameOrId: string | number): string {
+  const name = normalizeId(nameOrId);
+  return name.replace('memos/', '');
+}
+
+// ========================================
+// CRUD Operations
+// ========================================
+
+export async function createMemo(content: string, options?: { visibility?: Visibility }): Promise<Memo> {
+  const body: { content: string; visibility?: Visibility } = { content };
+  if (options?.visibility) {
+    body.visibility = options.visibility;
+  }
+  return apiRequest<Memo>("POST", "/memos", body);
+}
+
+export async function listMemos(options?: {
+  limit?: number;
+  tag?: string;
+  state?: State;
+  filter?: string;
+  pageToken?: string;
+  orderBy?: string;
+}): Promise<ListMemosResponse> {
+  const params = new URLSearchParams();
+
+  if (options?.limit) {
+    params.set("pageSize", String(options.limit));
+  }
+
+  if (options?.state) {
+    params.set("state", options.state);
+  }
+
+  // Build filter expression
+  let filterExpr = options?.filter || "";
+  if (options?.tag) {
+    const tagFilter = `tag == '${options.tag}'`;
+    filterExpr = filterExpr ? `(${filterExpr}) && ${tagFilter}` : tagFilter;
+  }
+  if (filterExpr) {
+    params.set("filter", filterExpr);
+  }
+
+  if (options?.pageToken) {
+    params.set("pageToken", options.pageToken);
+  }
+
+  if (options?.orderBy) {
+    params.set("orderBy", options.orderBy);
+  }
+
+  const query = params.toString();
+  const path = query ? `/memos?${query}` : "/memos";
+  return apiRequest<ListMemosResponse>("GET", path);
+}
+
+export async function getMemo(id: number | string): Promise<Memo> {
+  const numericId = extractId(id);
+  return apiRequest<Memo>("GET", `/memos/${numericId}`);
+}
+
+export async function updateMemo(
+  id: number | string,
+  updates: { content?: string; visibility?: Visibility; state?: State; pinned?: boolean }
+): Promise<Memo> {
+  const numericId = extractId(id);
+  const name = normalizeId(id);
+
+  // Build memo object with provided fields
+  const memo: Record<string, unknown> = { name };
+  const updateFields: string[] = [];
+
+  if (updates.content !== undefined) {
+    memo.content = updates.content;
+    updateFields.push("content");
+  }
+  if (updates.visibility !== undefined) {
+    memo.visibility = updates.visibility;
+    updateFields.push("visibility");
+  }
+  if (updates.state !== undefined) {
+    memo.state = updates.state;
+    updateFields.push("state");
+  }
+  if (updates.pinned !== undefined) {
+    memo.pinned = updates.pinned;
+    updateFields.push("pinned");
+  }
+
+  if (updateFields.length === 0) {
+    throw new MemoscriptError(
+      "No update fields provided",
+      "ERR_NO_UPDATES",
+      "Provide at least one field to update: content, visibility, state, pinned"
+    );
+  }
+
+  const updateMask = updateFields.join(",");
+  return apiRequest<Memo>("PATCH", `/memos/${numericId}?updateMask=${updateMask}`, memo);
+}
+
+export async function deleteMemo(id: number | string, options?: { force?: boolean }): Promise<void> {
+  const numericId = extractId(id);
+  const query = options?.force ? "?force=true" : "";
+  await apiRequest<void>("DELETE", `/memos/${numericId}${query}`);
+}
+
+// ========================================
+// Init Command
+// ========================================
+
+async function initCommand(): Promise<void> {
+  const readline = await import("readline");
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  const question = (prompt: string): Promise<string> => {
+    return new Promise((resolve) => {
+      rl.question(prompt, (answer) => {
+        resolve(answer);
+      });
+    });
+  };
+
+  try {
+    console.log("Memoscript Configuration\n");
+
+    const url = await question("Memos server URL (e.g., https://memos.example.com): ");
+    const token = await question("Access token: ");
+
+    if (!url || !token) {
+      throw new MemoscriptError(
+        "URL and token are required",
+        "ERR_INIT_MISSING",
+        "Both URL and token must be provided"
+      );
+    }
+
+    // Validate with test API call
+    console.log("\nValidating credentials...");
+    const cleanUrl = url.trim().replace(/\/$/, "");
+    const testResponse = await fetch(`${cleanUrl}/api/v1/memos?pageSize=1`, {
+      headers: {
+        "Authorization": `Bearer ${token.trim()}`,
+        "Content-Type": "application/json",
+      },
+    });
+
+    if (!testResponse.ok) {
+      let detail = "";
+      try {
+        const body = await testResponse.json() as { message?: string; error?: string };
+        detail = body.message || body.error || JSON.stringify(body);
+      } catch {
+        detail = testResponse.statusText;
+      }
+      throw new MemoscriptError(
+        `Authentication failed: ${detail}`,
+        "ERR_INIT_AUTH",
+        "Check your URL and token are correct"
+      );
+    }
+
+    // Create config directory
+    const { mkdirSync, writeFileSync, chmodSync } = await import("fs");
+    const configDir = process.env.MEMOSCRIPT_CONFIG_DIR || `${process.env.HOME || homedir()}/.config/memoscript`;
+    mkdirSync(configDir, { recursive: true });
+
+    // Write config file
+    const configPath = `${configDir}/.env`;
+    const configContent = `MEMOS_URL=${cleanUrl}\nMEMOS_TOKEN=${token.trim()}\n`;
+    writeFileSync(configPath, configContent, { mode: 0o600 });
+    chmodSync(configPath, 0o600);
+
+    console.log(`\n✓ Configuration saved to ${configPath}`);
+    console.log("\nSuggested alias:");
+    console.log('  alias m="memoscript"');
+  } finally {
+    rl.close();
+  }
+}
+
+// ========================================
+// CLI
+// ========================================
+
 async function main(): Promise<void> {
-  // TODO: implement CLI
+  const args = process.argv.slice(2);
+
+  if (args.length === 0) {
+    throw new MemoscriptError(
+      "No arguments provided",
+      "ERR_NO_ARGS",
+      "Usage: memoscript [command] [args]\n\nCommands:\n  init         Configure memoscript\n  create       Create a memo\n  list         List memos\n  get <id>     Get a memo\n  update <id>  Update a memo\n  delete <id>  Delete a memo\n\nDefault: Any text without a command creates a memo"
+    );
+  }
+
+  const RESERVED_COMMANDS = ["init", "list", "get", "update", "delete", "create"];
+  const firstArg = args[0];
+
+  // Help
+  if (firstArg === "--help" || firstArg === "-h") {
+    console.log("Usage: memoscript [command] [args]\n");
+    console.log("Commands:");
+    console.log("  init              Configure memoscript");
+    console.log("  create [text]     Create a memo");
+    console.log("  list              List memos");
+    console.log("  get <id>          Get a memo");
+    console.log("  update <id>       Update a memo");
+    console.log("  delete <id>       Delete a memo");
+    console.log("\nDefault: Any text without a command creates a memo");
+    console.log("\nFlags:");
+    console.log("  --visibility, -v  Set visibility (PRIVATE|PROTECTED|PUBLIC)");
+    console.log("  --state, -s       Set state (NORMAL|ARCHIVED)");
+    console.log("  --tag, -t         Filter by tag");
+    console.log("  --filter, -f      Custom filter expression");
+    console.log("  --limit, -l       Page size limit");
+    console.log("  --pin             Pin memo");
+    console.log("  --unpin           Unpin memo");
+    console.log("  --force           Skip confirmation prompts");
+    return;
+  }
+
+  // Init command
+  if (firstArg === "init") {
+    await initCommand();
+    return;
+  }
+
+  // Parse flags and content
+  const parseFlags = (startIndex: number) => {
+    const flags: Record<string, string | boolean> = {};
+    const contentParts: string[] = [];
+    let i = startIndex;
+
+    while (i < args.length) {
+      const arg = args[i];
+
+      if (arg === "--visibility" || arg === "-v") {
+        flags.visibility = args[++i];
+      } else if (arg === "--state" || arg === "-s") {
+        flags.state = args[++i];
+      } else if (arg === "--tag" || arg === "-t") {
+        flags.tag = args[++i];
+      } else if (arg === "--filter" || arg === "-f") {
+        flags.filter = args[++i];
+      } else if (arg === "--limit" || arg === "-l") {
+        flags.limit = args[++i];
+      } else if (arg === "--page") {
+        flags.page = args[++i];
+      } else if (arg === "--order") {
+        flags.order = args[++i];
+      } else if (arg === "--pin") {
+        flags.pin = true;
+      } else if (arg === "--unpin") {
+        flags.unpin = true;
+      } else if (arg === "--force") {
+        flags.force = true;
+      } else {
+        contentParts.push(arg);
+      }
+      i++;
+    }
+
+    return { flags, content: contentParts.join(" ") };
+  };
+
+  // List command
+  if (firstArg === "list") {
+    const { flags } = parseFlags(1);
+    const options: Parameters<typeof listMemos>[0] = {
+      limit: flags.limit ? parseInt(flags.limit as string, 10) : 20,
+      state: flags.state ? (flags.state as string).toUpperCase() as State : "NORMAL",
+    };
+
+    if (flags.tag) options.tag = flags.tag as string;
+    if (flags.filter) options.filter = flags.filter as string;
+    if (flags.page) options.pageToken = flags.page as string;
+    if (flags.order) options.orderBy = flags.order as string;
+
+    const result = await listMemos(options);
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+
+  // Get command
+  if (firstArg === "get") {
+    if (args.length < 2) {
+      throw new MemoscriptError(
+        "Missing memo ID",
+        "ERR_MISSING_ID",
+        "Usage: memoscript get <id>"
+      );
+    }
+    const memo = await getMemo(args[1]);
+    console.log(JSON.stringify(memo, null, 2));
+    return;
+  }
+
+  // Update command
+  if (firstArg === "update") {
+    if (args.length < 2) {
+      throw new MemoscriptError(
+        "Missing memo ID",
+        "ERR_MISSING_ID",
+        "Usage: memoscript update <id> [content] [--visibility/-v] [--state/-s] [--pin] [--unpin]"
+      );
+    }
+
+    const id = args[1];
+    const { flags, content } = parseFlags(2);
+
+    const updates: Parameters<typeof updateMemo>[1] = {};
+    if (content) updates.content = content;
+    if (flags.visibility) updates.visibility = (flags.visibility as string).toUpperCase() as Visibility;
+    if (flags.state) updates.state = (flags.state as string).toUpperCase() as State;
+    if (flags.pin) updates.pinned = true;
+    if (flags.unpin) updates.pinned = false;
+
+    const result = await updateMemo(id, updates);
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+
+  // Delete command
+  if (firstArg === "delete") {
+    if (args.length < 2) {
+      throw new MemoscriptError(
+        "Missing memo ID",
+        "ERR_MISSING_ID",
+        "Usage: memoscript delete <id> [--force]"
+      );
+    }
+
+    const id = args[1];
+    const { flags } = parseFlags(2);
+
+    if (!flags.force) {
+      // Prompt for confirmation
+      const readline = await import("readline");
+      const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout,
+      });
+
+      const confirm = await new Promise<string>((resolve) => {
+        rl.question(`Delete memo ${normalizeId(id)}? [y/N] `, (answer) => {
+          rl.close();
+          resolve(answer);
+        });
+      });
+
+      if (confirm.toLowerCase() !== "y" && confirm.toLowerCase() !== "yes") {
+        console.log("Cancelled");
+        return;
+      }
+    }
+
+    await deleteMemo(id, { force: !!flags.force });
+    console.log(JSON.stringify({ deleted: true, name: normalizeId(id) }, null, 2));
+    return;
+  }
+
+  // Create command (explicit or default)
+  if (firstArg === "create") {
+    const { flags, content } = parseFlags(1);
+
+    if (!content) {
+      throw new MemoscriptError(
+        "No content provided",
+        "ERR_NO_CONTENT",
+        "Usage: memoscript create <content>"
+      );
+    }
+
+    const options: Parameters<typeof createMemo>[1] = {};
+    if (flags.visibility) options.visibility = (flags.visibility as string).toUpperCase() as Visibility;
+
+    const memo = await createMemo(content, options);
+    console.log(JSON.stringify(memo, null, 2));
+    return;
+  }
+
+  // Handle '--' separator for reserved word collisions
+  if (firstArg === "--") {
+    const { flags, content } = parseFlags(1);
+
+    if (!content) {
+      throw new MemoscriptError(
+        "No content provided",
+        "ERR_NO_CONTENT",
+        "Usage: memoscript -- <content>"
+      );
+    }
+
+    const options: Parameters<typeof createMemo>[1] = {};
+    if (flags.visibility) options.visibility = (flags.visibility as string).toUpperCase() as Visibility;
+
+    const memo = await createMemo(content, options);
+    console.log(JSON.stringify(memo, null, 2));
+    return;
+  }
+
+  // Default: treat as memo content unless first arg is a reserved command
+  if (!RESERVED_COMMANDS.includes(firstArg)) {
+    const { flags, content } = parseFlags(0);
+
+    if (!content) {
+      throw new MemoscriptError(
+        "No content provided",
+        "ERR_NO_CONTENT",
+        "Usage: memoscript <content>"
+      );
+    }
+
+    const options: Parameters<typeof createMemo>[1] = {};
+    if (flags.visibility) options.visibility = (flags.visibility as string).toUpperCase() as Visibility;
+
+    const memo = await createMemo(content, options);
+    console.log(JSON.stringify(memo, null, 2));
+    return;
+  }
 }
 
 if (import.meta.main) {
