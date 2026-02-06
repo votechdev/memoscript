@@ -1,0 +1,8 @@
+{
+  "name": "memoscript",
+  "version": "1.0.0",
+  "type": "module",
+  "bin": {
+    "memoscript": "memoscript.ts"
+  }
+}
