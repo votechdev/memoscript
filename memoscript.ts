@@ -3,10 +3,10 @@
 import { existsSync, readFileSync } from "fs";
 import { homedir } from "os";
 
-type Visibility = "PRIVATE" | "PROTECTED" | "PUBLIC";
-type State = "NORMAL" | "ARCHIVED";
+export type Visibility = "PRIVATE" | "PROTECTED" | "PUBLIC";
+export type State = "NORMAL" | "ARCHIVED";
 
-interface Memo {
+export interface Memo {
   readonly name: string;
   readonly state: State;
   readonly creator: string;
@@ -25,14 +25,14 @@ interface Memo {
   readonly reactions: readonly Reaction[];
 }
 
-interface MemoProperty {
+export interface MemoProperty {
   readonly hasLink: boolean;
   readonly hasTaskList: boolean;
   readonly hasCode: boolean;
   readonly hasIncompleteTasks: boolean;
 }
 
-interface Attachment {
+export interface Attachment {
   readonly name: string;
   readonly filename: string;
   readonly type: string;
@@ -40,13 +40,13 @@ interface Attachment {
   readonly createTime: string;
 }
 
-interface MemoRelation {
+export interface MemoRelation {
   readonly memo: string;
   readonly relatedMemo: string;
   readonly type: "REFERENCE" | "COMMENT";
 }
 
-interface Reaction {
+export interface Reaction {
   readonly name: string;
   readonly creator: string;
   readonly contentId: string;
@@ -54,17 +54,17 @@ interface Reaction {
   readonly createTime: string;
 }
 
-interface ListMemosResponse {
+export interface ListMemosResponse {
   readonly memos: readonly Memo[];
   readonly nextPageToken: string;
 }
 
-interface Config {
+export interface Config {
   readonly url: string;
   readonly token: string;
 }
 
-class MemoscriptError extends Error {
+export class MemoscriptError extends Error {
   constructor(
     message: string,
     readonly code: string,
@@ -419,52 +419,51 @@ async function initCommand(): Promise<void> {
   }
 }
 
+function showHelp(): void {
+  const help = `memoscript — Frictionless memo capture for Memos
+
+Usage:
+  memoscript <content>              Create a memo (default)
+  memoscript <command> [options]    Run a command
+
+Commands:
+  create [text]     Create a memo
+  list              List memos
+  get <id>          Get a memo by ID
+  update <id>       Update a memo
+  delete <id>       Delete a memo
+  init              Configure memoscript
+
+Flags:
+  --visibility, -v  PRIVATE|PROTECTED|PUBLIC
+  --state, -s       NORMAL|ARCHIVED
+  --tag, -t         Filter by tag
+  --filter, -f      Custom filter expression
+  --limit, -l       Page size limit
+  --pin/--unpin     Pin or unpin a memo
+  --force           Skip confirmation prompts
+  --quiet, -q       Suppress output
+  --json            JSON output (default)
+
+Examples:
+  memoscript "quick thought #idea"
+  memoscript list --tag idea --limit 5
+  memoscript get 42
+  memoscript update 42 "new content"
+  memoscript delete 42 --force
+  echo "piped input" | memoscript -
+
+Config: ~/.config/memoscript/.env`;
+
+  console.log(help);
+}
+
 // ========================================
 // CLI
 // ========================================
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
-
-  if (args.length === 0) {
-    throw new MemoscriptError(
-      "No arguments provided",
-      "ERR_NO_ARGS",
-      "Usage: memoscript [command] [args]\n\nCommands:\n  init         Configure memoscript\n  create       Create a memo\n  list         List memos\n  get <id>     Get a memo\n  update <id>  Update a memo\n  delete <id>  Delete a memo\n\nDefault: Any text without a command creates a memo"
-    );
-  }
-
-  const RESERVED_COMMANDS = ["init", "list", "get", "update", "delete", "create"];
-  const firstArg = args[0];
-
-  // Help
-  if (firstArg === "--help" || firstArg === "-h") {
-    console.log("Usage: memoscript [command] [args]\n");
-    console.log("Commands:");
-    console.log("  init              Configure memoscript");
-    console.log("  create [text]     Create a memo");
-    console.log("  list              List memos");
-    console.log("  get <id>          Get a memo");
-    console.log("  update <id>       Update a memo");
-    console.log("  delete <id>       Delete a memo");
-    console.log("\nDefault: Any text without a command creates a memo");
-    console.log("\nFlags:");
-    console.log("  --visibility, -v  Set visibility (PRIVATE|PROTECTED|PUBLIC)");
-    console.log("  --state, -s       Set state (NORMAL|ARCHIVED)");
-    console.log("  --tag, -t         Filter by tag");
-    console.log("  --filter, -f      Custom filter expression");
-    console.log("  --limit, -l       Page size limit");
-    console.log("  --pin             Pin memo");
-    console.log("  --unpin           Unpin memo");
-    console.log("  --force           Skip confirmation prompts");
-    return;
-  }
-
-  // Init command
-  if (firstArg === "init") {
-    await initCommand();
-    return;
-  }
 
   // Parse flags and content
   const parseFlags = (startIndex: number) => {
@@ -495,6 +494,10 @@ async function main(): Promise<void> {
         flags.unpin = true;
       } else if (arg === "--force") {
         flags.force = true;
+      } else if (arg === "--quiet" || arg === "-q") {
+        flags.quiet = true;
+      } else if (arg === "--json") {
+        flags.json = true;
       } else {
         contentParts.push(arg);
       }
@@ -503,6 +506,56 @@ async function main(): Promise<void> {
 
     return { flags, content: contentParts.join(" ") };
   };
+
+  const formatOutput = (data: unknown, flags: Record<string, string | boolean>) => {
+    if (flags.quiet) return;
+    console.log(JSON.stringify(data, null, 2));
+  };
+
+  // Handle stdin input: explicit "-" or piped input with no args
+  if (args[0] === "-" || (args.length === 0 && process.stdin.isTTY === false)) {
+    const startIndex = args[0] === "-" ? 1 : 0;
+    const { flags } = parseFlags(startIndex);
+    const stdinContent = (await Bun.stdin.text()).trim();
+
+    if (!stdinContent) {
+      throw new MemoscriptError(
+        "No content provided from stdin",
+        "ERR_NO_CONTENT",
+        "Usage: echo 'content' | memoscript - OR cat file.md | memoscript"
+      );
+    }
+
+    const options: { visibility?: Visibility } = {};
+    if (flags.visibility) options.visibility = (flags.visibility as string).toUpperCase() as Visibility;
+
+    const memo = await createMemo(stdinContent, options);
+    formatOutput(memo, flags);
+    return;
+  }
+
+  if (args.length === 0) {
+    throw new MemoscriptError(
+      "No arguments provided",
+      "ERR_NO_ARGS",
+      "Usage: memoscript [command] [args]\n\nCommands:\n  init         Configure memoscript\n  create       Create a memo\n  list         List memos\n  get <id>     Get a memo\n  update <id>  Update a memo\n  delete <id>  Delete a memo\n\nDefault: Any text without a command creates a memo"
+    );
+  }
+
+  const RESERVED_COMMANDS = ["init", "list", "get", "update", "delete", "create"];
+  const firstArg = args[0];
+
+  // Help
+  if (firstArg === "--help" || firstArg === "-h") {
+    showHelp();
+    return;
+  }
+
+  // Init command
+  if (firstArg === "init") {
+    await initCommand();
+    return;
+  }
 
   // List command
   if (firstArg === "list") {
@@ -518,7 +571,7 @@ async function main(): Promise<void> {
     if (flags.order) options.orderBy = flags.order as string;
 
     const result = await listMemos(options);
-    console.log(JSON.stringify(result, null, 2));
+    formatOutput(result, flags);
     return;
   }
 
@@ -531,8 +584,9 @@ async function main(): Promise<void> {
         "Usage: memoscript get <id>"
       );
     }
+    const { flags } = parseFlags(2);
     const memo = await getMemo(args[1]);
-    console.log(JSON.stringify(memo, null, 2));
+    formatOutput(memo, flags);
     return;
   }
 
@@ -557,7 +611,7 @@ async function main(): Promise<void> {
     if (flags.unpin) updates.pinned = false;
 
     const result = await updateMemo(id, updates);
-    console.log(JSON.stringify(result, null, 2));
+    formatOutput(result, flags);
     return;
   }
 
@@ -596,7 +650,7 @@ async function main(): Promise<void> {
     }
 
     await deleteMemo(id, { force: !!flags.force });
-    console.log(JSON.stringify({ deleted: true, name: normalizeId(id) }, null, 2));
+    formatOutput({ deleted: true, name: normalizeId(id) }, flags);
     return;
   }
 
@@ -616,7 +670,7 @@ async function main(): Promise<void> {
     if (flags.visibility) options.visibility = (flags.visibility as string).toUpperCase() as Visibility;
 
     const memo = await createMemo(content, options);
-    console.log(JSON.stringify(memo, null, 2));
+    formatOutput(memo, flags);
     return;
   }
 
@@ -636,7 +690,7 @@ async function main(): Promise<void> {
     if (flags.visibility) options.visibility = (flags.visibility as string).toUpperCase() as Visibility;
 
     const memo = await createMemo(content, options);
-    console.log(JSON.stringify(memo, null, 2));
+    formatOutput(memo, flags);
     return;
   }
 
@@ -656,7 +710,7 @@ async function main(): Promise<void> {
     if (flags.visibility) options.visibility = (flags.visibility as string).toUpperCase() as Visibility;
 
     const memo = await createMemo(content, options);
-    console.log(JSON.stringify(memo, null, 2));
+    formatOutput(memo, flags);
     return;
   }
 }
