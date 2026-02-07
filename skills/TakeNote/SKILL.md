@@ -7,13 +7,6 @@ description: Quick note capture via memoscript. USE WHEN user says make a note, 
 
 Capture notes to Memos via memoscript with smart, selective tagging.
 
-## Customization
-
-**Before executing, check for user customizations at:**
-`~/.claude/skills/PAI/USER/SKILLCUSTOMIZATIONS/MakeNote/`
-
-If this directory exists, load and apply any PREFERENCES.md or configurations found there. These override default behavior. If the directory does not exist, proceed with skill defaults.
-
 ## Workflow Routing
 
 | Workflow | Trigger | File |
@@ -23,6 +16,7 @@ If this directory exists, load and apply any PREFERENCES.md or configurations fo
 ## Quick Reference
 
 - **CLI:** `bun ~/Tools/memoscript/memoscript.ts create "<content>"`
+- Markdown: Memos *MUST* be formatted in markdown and optimized for readability 
 - **Tags:** Inline `#hashtags` in content — Memos parses them natively
 - **Modes:** Explicit (user provides content) or Inferred (derive from conversation)
 - **Tagging rules:** `TaggingGuide.md`
