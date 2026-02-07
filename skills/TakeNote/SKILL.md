@@ -15,7 +15,7 @@ Capture notes to Memos via memoscript with smart, selective tagging.
 
 ## Quick Reference
 
-- **CLI:** `bun ~/Tools/memoscript/memoscript.ts create "<content>"`
+- **CLI:** `echo "<content>" | bun ~/Tools/memoscript/memoscript.ts - --quiet`
 - Markdown: Memos *MUST* be formatted in markdown and optimized for readability 
 - **Tags:** Inline `#hashtags` in content — Memos parses them natively
 - **Modes:** Explicit (user provides content) or Inferred (derive from conversation)

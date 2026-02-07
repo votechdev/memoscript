@@ -50,17 +50,15 @@ Compose the final memo as a single string:
 
 ## Step 4: Create the Memo
 
-```bash
-bun ~/Tools/memoscript/memoscript.ts create "[MEMO_CONTENT]" --quiet
-```
-
-**Important:** Escape any double quotes in the memo content with `\"`.
-
-If the content contains characters that are problematic for shell quoting, pipe it instead:
+Always pipe content via stdin to avoid shell quoting issues and command/content collisions:
 
 ```bash
-echo "[MEMO_CONTENT]" | bun ~/Tools/memoscript/memoscript.ts -
+cat <<'MEMO' | bun ~/Tools/memoscript/memoscript.ts - --quiet
+[MEMO_CONTENT]
+MEMO
 ```
+
+This heredoc approach handles multi-line markdown, special characters, and quotes without escaping.
 
 ## Step 5: Confirm
 
